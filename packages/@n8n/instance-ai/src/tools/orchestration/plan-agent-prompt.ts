@@ -58,7 +58,27 @@ ${NATIVE_NODE_PREFERENCE}
    - Emit data tables FIRST. If the request also requires automation, add workflow items that depend on them. A plan may consist entirely of data-table items.
    - Set \`summary\` and \`assumptions\` on your first call
    - Each call makes the item visible to the user immediately
-   - \`purpose\`: Write a rich, user-focused description of what this item delivers and why. Include key requirements and behaviors from the user's request. 3-5 sentences. Do NOT include node names, parameters, or implementation details — the builder handles that.
+   - \`purpose\`: Do NOT write freeform prose. For every \`workflow\` item, write exactly these lines, in this exact order:
+     - \`Outcome: <one sentence>\`
+     - \`Trigger mode: <Webhook | Schedule | Chat | Form | Manual | Other>\`
+     - \`External systems: <semicolon-separated systems, or "None">\`
+     - \`Required effects: <semicolon-separated actions/outcomes, or "None">\`
+     - \`Required branches: <semicolon-separated branch behaviors, or "None">\`
+     - \`Required data: <semicolon-separated upstream data/fields, or "None">\`
+     - \`Explicit constraints: <semicolon-separated user-stated workflow-shape or resource constraints, or "None">\`
+     - \`Empty/invalid behavior: <semicolon-separated behaviors, or "Not specified">\`
+     - \`Done when: <semicolon-separated observable acceptance checks>\`
+   - \`purpose\` rules:
+     - Always include every label, even when the value is \`None\` or \`Not specified\`
+     - Do NOT name nodes, node parameters, or wiring details — describe requirements in workflow terms only
+     - If the user did not specify an implementation detail, do not invent one
+     - Use \`Explicit constraints\` only for constraints directly stated by the user or clearly implied by the product requirement
+     - In \`Required branches\`, explicitly state partial-failure behavior whenever the user asked for multiple actions from the same trigger (for example, whether other actions must still complete if one action fails)
+     - In \`Required data\`, include any fields that later conditions or response paths depend on, and describe when those fields must remain available downstream
+     - Preserve a distinction between data that should stay available downstream and data that makes the whole item invalid. Do not turn a field into a workflow-wide rejection requirement merely because one requested effect or message uses it.
+     - For multi-effect intake workflows, scope missing or invalid fields to the effects that actually require them unless the user explicitly asks to reject the whole item or every requested effect truly requires that field. Keep logging, notifications, acknowledgements, or other effects that can use the remaining data active instead of inventing an all-effects invalid path.
+     - Preserve concrete user-provided identifiers that the builder must honor inside \`Required effects\` or \`Explicit constraints\`, not in \`triggerDescription\`, \`integrations\`, or \`assumptions\`
+     - Put assumptions only in \`assumptions\`, not in \`purpose\`
    - \`triggerDescription\`: a few words describing trigger type (e.g. "Webhook POST", "Schedule daily"), no resource identifiers
    - \`integrations\`: service names only (e.g. "Slack", "Google Calendar"), no resource identifiers or qualifiers
    - \`dependsOn\`: **CRITICAL** — set dependencies correctly. Data tables before workflows that use them. Workflows that produce data before workflows that consume it. Independent workflows should NOT depend on each other.
@@ -80,7 +100,18 @@ ${NATIVE_NODE_PREFERENCE}
 - **Each item's \`purpose\` describes only that item.** Do not reference work handled by other plan items — each agent only sees its own spec, and cross-task context causes scope creep.
 - **Workflow verification is mandatory.** For **every** \`workflow\` item you add, also add a \`checkpoint\` item whose \`dependsOn\` includes that workflow's ID. Checkpoints are orchestrator-executed — the orchestrator runs them itself using its own tools, they are not delegated.
   - \`title\`: a user-readable verification goal, e.g. \`"Verify 'Daily API Email' workflow runs successfully"\`.
-  - \`instructions\`: detailed steps the orchestrator must execute. Prefer \`verify-built-workflow\` with the work item ID from the build outcome — it uses pin data captured at build time, so it works even for event-triggered workflows (webhook, form, chat, mcp). For workflows with real credentials and a testable trigger (manual, schedule), \`executions(action="run")\` is acceptable. State the pass condition in plain terms (e.g. "run completes without errors and produces at least one output row").
+  - \`instructions\`: do NOT write freeform prose. Write exactly these lines, in this exact order:
+    - \`Verify trigger mode: <what must be true>\`
+    - \`Verify external systems: <what must be true>\`
+    - \`Verify required effects: <what must be true>\`
+    - \`Verify required branches: <what must be true>\`
+    - \`Verify required data: <what must be true>\`
+    - \`Verify explicit constraints: <what must be true>\`
+    - \`Verify empty/invalid behavior: <what must be true>\`
+    - \`Pass condition: <plain-language success condition>\`
+  - In \`Verify required branches\`, explicitly check partial-failure behavior whenever multiple requested side effects exist.
+  - In \`Verify required data\`, explicitly check that downstream branching/response logic still has access to the fields it depends on.
+  - Prefer \`verify-built-workflow\` with the work item ID from the build outcome — it uses pin data captured at build time, so it works even for event-triggered workflows (webhook, form, chat, mcp). For workflows with real credentials and a testable trigger (manual, schedule), \`executions(action="run")\` is acceptable.
   - Do NOT list \`tools\` on a checkpoint — it is not a delegate task.
   - Do NOT emit a checkpoint for a \`data-table\`, \`research\`, or \`delegate\` item. Checkpoints are for workflows only.
 - **Always call \`submit-plan\` after the last \`add-plan-item\`.** On rejection, be surgical — change only what the user asked for. Never fabricate node names; search first if unsure.`;

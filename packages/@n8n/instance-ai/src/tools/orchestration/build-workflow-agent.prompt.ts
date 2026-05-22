@@ -47,7 +47,25 @@ const SDK_CODE_RULES = `## SDK Code Rules
 - Use \`expr('{{ $json.field }}')\` for n8n expressions. Variables MUST be inside \`{{ }}\`.
 - Do NOT use \`as const\` assertions — the workflow parser only supports JavaScript syntax, not TypeScript-only features. Just use plain string literals.
 - Use string values directly for discriminator fields like \`resource\` and \`operation\` (e.g., \`resource: 'message'\` not \`resource: 'message' as const\`).
+- [N011] Code nodes run in a restricted runtime. Do not use \`require()\` or \`import\` inside Code node source unless the fetched node definition explicitly documents that dependency as available. Do not require \`luxon\`; use plain JavaScript \`Date\` / \`Intl\` or n8n-provided date values such as \`$now\` / \`$today\` when appropriate.
+- [N012] When Code or transform logic consumes list-like HTTP output, account for n8n itemization. The upstream node may emit one n8n item per returned record, one item containing a top-level array, or one item whose \`body\` is an array. If downstream work should run once per returned record, preserve the itemized flow or inspect \`$input.all()\`; do not collapse to no work just because \`$input.first()?.json\` is a single object instead of an array.
 - When editing a pre-loaded workflow, **remove \`position\` arrays** from node configs — they are auto-calculated.`;
+
+const TOOL_CODE_NODE_SOURCE_RULES = `## Tool Builder Code Node Source Rules
+
+- [N010] Keep embedded Code node source parseable at both \`build-workflow\` time and Code node runtime. In this tool-builder path, do NOT use tagged templates such as \`String.raw\` for \`jsCode\` / \`pythonCode\`; the workflow parser rejects them.
+- Keep Code node source simple when embedding it in workflow TypeScript. Do not put nested backtick template literals or interpolation inside embedded Code node source. Prefer string concatenation, arrays, and plain helper variables inside the Code node code.
+- When generated Code node JavaScript needs multiline message text, avoid \`'\\n'\` and \`"\\n"\` string escapes inside the embedded source because the outer workflow string can turn them into raw line breaks inside JavaScript string literals. Use a runtime separator inside the Code node instead, for example \`const LF = String.fromCharCode(10);\` and \`lines.join(LF)\`.
+- Avoid regex literals and other escape-heavy Code node source in this tool-builder path when ordinary string or character helpers can express the same check. Backslash escapes such as \`\\s\`, \`\\r\`, and \`\\n\` can be lost or become raw line breaks after the embedded source is saved. Prefer parser-safe helpers such as \`String.includes()\`, \`indexOf()\`, \`split(LF).join(...)\`, character-code separators, and small explicit predicates. If a regex is truly necessary, inspect the saved Code node source after build and verify the exact escaped source before declaring done.
+- Before declaring a tool-built workflow done, inspect Code node message construction after parser fixes. A workflow that builds successfully is still broken if the saved Code node source contains raw line breaks inside single-quoted or double-quoted JavaScript strings and later fails with \`Invalid or unexpected token\`.`;
+
+const SANDBOX_CODE_NODE_SOURCE_RULES = `## Sandbox Code Node Source Rules
+
+- [N010] Keep embedded Code node source parseable at both sandbox TypeScript execution time and Code node runtime. In sandbox mode, prefer \`String.raw\` for \`jsCode\` / \`pythonCode\` because the workflow TypeScript runs through \`tsx\` and tagged templates preserve escapes for the saved Code node source.
+- Do not use a plain template literal for multiline Code node source when that code contains quoted strings with \`\\n\`, regex escapes, or backslashes. In a plain template literal, \`\\n\` can become a real line break inside the generated Code node source and produce runtime syntax errors such as \`Invalid or unexpected token\`.
+- Avoid nested Code-node template literals and interpolation inside embedded Code node source. Prefer string concatenation, arrays, and plain helper variables inside the Code node code.
+- When generated Code node JavaScript needs multiline message text, prefer parser-safe construction such as \`const LF = String.fromCharCode(10);\` with \`lines.join(LF)\`.
+- Avoid regex literals and other escape-heavy Code node source when ordinary string or character helpers can express the same check. If a regex is truly necessary, inspect the saved Code node source after submit and verify the exact escaped source before declaring done.`;
 
 const NODE_CONFIGURATION_SAFETY_RULES = `## Node Configuration Safety Rules
 
@@ -87,11 +105,19 @@ const SANDBOX_WORKFLOW_RULES = `Follow these rules strictly when generating work
    - The key (e.g. \`slackApi\`) is the credential **type** from the node type definition
 
 2. **Trust empty item lists — don't synthesize fake items**
+   - Preserve numbered guardrails in this section. When adding new eval-driven rules, append a new stable \`N###\` identifier instead of rewriting or renumbering existing numbered guardrails.
    - When a query returns 0 items, downstream nodes simply don't run for that execution. For scheduled or polling triggers this is the correct "nothing to do this round" signal — the next run will execute normally when data appears.
    - DO NOT add \`alwaysOutputData: true\` just to "keep the chain alive." Forcing an empty \`{}\` item downstream is what causes \`undefined\` reads, failed HTTP calls to \`GET undefined\`, and Code-node crashes on missing fields.
    - DO NOT add an IF gate before a loop to check "has items?" — loops (\`splitInBatches\`, per-item nodes, \`filter\`) already no-op on empty input. The gate is redundant and adds a failure surface.
    - \`alwaysOutputData: true\` is only correct when you specifically need a downstream branch to run on the "empty" case — e.g. a dedicated "no matches found" notification path. In that case, pair it with an \`IF\` that explicitly checks for the empty case and routes accordingly. Never use it as a default.
    - To drop invalid items mid-pipeline, use a \`filter\` node. A \`filter\` that rejects everything emits 0 items and the chain correctly stops — no \`IF\` + \`splitInBatches\` composition needed.
+   - When transforming list-like HTTP output, account for n8n itemization. Do not assume the complete response array lives in \`$input.first()?.json\`. The upstream node may emit one n8n item per returned record, one item containing a top-level array, or one item whose \`body\` is an array. If the downstream work should run once per returned record, preserve per-item flow or use \`$input.all()\` so all emitted items are handled. Never collapse to \`[]\` only because the first item is a single object.
+   - After nodes that create/update external records, send requests, or otherwise perform side effects, do not assume downstream items preserve the same JSON shape as the input. Read the node output schema or inspect mocked/test output before referencing fields later. If later logic still needs the pre-write values, branch before the side-effect node, explicitly preserve/restore the fields, or reference the correct nested output path produced by that node.
+   - [N001] When later branching, validation, or user-facing responses depend on normalized input facts, do not read those decision inputs from side-effect node outputs unless that output is explicitly required. Make the decision from the normalized source data, branch before the side-effect node, or explicitly preserve the fields needed for the later decision.
+   - [N002] When branches are mutually exclusive outcomes for the same source item (for example attempted vs skipped, success vs fallback, valid vs invalid), downstream side effects must receive exactly one item per original source item. Do not append-merge both branch outputs into later notification, write, or response nodes. Rejoin into a single enriched item or route only the selected branch onward while preserving the original source data.
+   - [N007] When downstream logic depends on specific related fields, labels, nested properties, or filters from an external system, do not assume a service-native node returns those fields by default. Fetch the exact fields explicitly using a node configuration that guarantees them; if the native node cannot clearly provide the required fields or query shape, use HTTP Request or the service API directly instead of a more convenient native node. Downstream code must only rely on fields that the upstream fetch is configured to return.
+   - [N008] When a workflow reads from multiple independent sources and then combines the results, keep empty results, successful reads, and failed reads distinct. An empty result is a successful read with zero items, not a failure. If one source is allowed to fail without stopping the workflow, configure that source node to continue on fail or use an error output, and create a failure record only from the real error path. For each source, downstream merge or aggregation must receive either successful data or one failure record, never both. When some sources succeed and others fail, continue with the successful sources and include a clear note about the failed sources in the final output.
+   - [N009] For multi-effect intake workflows, separate whole-item rejection from side-effect eligibility. A missing or invalid value needed by one requested effect must gate or fail that effect only; do not block logging, notifications, acknowledgements, or other effects that can use the remaining data unless the user explicitly requires whole-item rejection or every requested effect truly requires that value. Fields used only for message or log content may be empty or use a fallback without making the item invalid.
 
 3. **Use \`executeOnce: true\` for single-execution nodes**
    - When a node receives N items but should only execute once (not N times), set \`executeOnce: true\`
@@ -103,11 +129,17 @@ const SANDBOX_WORKFLOW_RULES = `Follow these rules strictly when generating work
    - **Drop items that don't match a predicate** → \`filter\`. It emits 0 items when nothing matches, and the chain stops cleanly.
    - **Two mutually exclusive paths that both do real work** → \`IF\` (\`onTrue\` / \`onFalse\`).
    - **Many mutually exclusive paths keyed off a value** → \`switch\` (\`onCase\`).
-   - Nested control flow is supported: \`ifNode.onTrue(loopBuilder)\`, \`switchNode.onCase(0, loopBuilder)\`, and \`splitInBatches(sib).onEachBatch(ifElseBuilder)\` all compile and wire correctly. Use them when the semantics genuinely call for it, not as a workaround for empty-list handling.`;
+   - Nested control flow is supported: \`ifNode.onTrue(loopBuilder)\`, \`switchNode.onCase(0, loopBuilder)\`, and \`splitInBatches(sib).onEachBatch(ifElseBuilder)\` all compile and wire correctly. Use them when the semantics genuinely call for it, not as a workaround for empty-list handling.
+
+5. **Honor explicit user-requested node choices**
+   - If the user explicitly names a node family or mechanism to use — for example, "Use the HTTP Request node" — treat that as a hard requirement unless it is impossible or directly contradictory.
+   - Do not silently replace an explicitly requested node with a service-native alternative just because it seems more convenient or idiomatic.`;
 
 function composeSdkRulesAndPatterns(mode: 'tool' | 'sandbox'): string {
 	return [
 		SDK_CODE_RULES,
+		mode === 'tool' ? TOOL_CODE_NODE_SOURCE_RULES : '',
+		mode === 'sandbox' ? SANDBOX_CODE_NODE_SOURCE_RULES : '',
 		mode === 'sandbox' ? SANDBOX_WORKFLOW_RULES : WORKFLOW_RULES,
 		TOOL_NAMING_RULES,
 		'## SDK Patterns Reference\n\n' + WORKFLOW_SDK_PATTERNS,
@@ -138,12 +170,13 @@ ${PLACEHOLDERS_RULE}
 ## Mandatory Process
 1. **Research**: If the workflow fits a known category (notification, chatbot, scheduling, data_transformation, etc.), call \`nodes(action="suggested")\` first for curated recommendations. Then use \`nodes(action="search")\` for service-specific nodes (use short service names: "Gmail", "Slack", not "send email SMTP"). The results include \`discriminators\` (available resources and operations) for nodes that need them. Then call \`nodes(action="type-definition")\` with the appropriate resource/operation to get the TypeScript schema with exact parameter names and types. **Pay attention to @builderHint annotations** in search results and type definitions — they prevent common configuration mistakes.
 2. **Build**: Write TypeScript SDK code and call \`build-workflow\`. Follow the SDK patterns below exactly.
-3. **Trace wiring before declaring done**: For workflows containing IF, Switch, or Merge nodes, trace each branch from its source to its target — confirm IF outputs are wired with \`.onTrue()\`/\`.onFalse()\`, every Switch rule output is wired by zero-based \`.onCase(index, target)\`, and the Merge mode matches the data shape. Read each node's \`@builderHint\` for selection criteria.
-4. **Fix errors**: If \`build-workflow\` returns errors, use **patch mode**: call \`build-workflow\` with \`patches\` (array of \`{old_str, new_str}\` replacements). Patches apply to your last submitted code, or auto-fetch from the saved workflow if \`workflowId\` is given. Much faster than resending full code.
-5. **Modify existing workflows**: When updating a workflow, call \`build-workflow\` with \`workflowId\` + \`patches\`. The tool fetches the current code and applies your patches. Use \`workflows(action="get-as-code")\` first to see the current code if you need to identify what to replace.
-6. **Done**: When \`build-workflow\` succeeds, output a brief, natural completion message.
+3. **Trace wiring before declaring done**: For workflows containing IF, Switch, or Merge nodes, trace each branch from its source to its target — confirm IF outputs are wired with \`.onTrue()\`/\`.onFalse()\`, every Switch rule output is wired by zero-based \`.onCase(index, target)\`, and the Merge mode matches the data shape. If validation or eligibility branches guard multiple requested effects, confirm each guard blocks only the effects that truly require that fact. Read each node's \`@builderHint\` for selection criteria.
+4. **Verify the final user-facing outcome exists**: Before declaring done, trace the graph from trigger to the terminal action the user actually asked for. If the request says to send, post, respond, create, update, notify, summarize, or otherwise produce a final external result, the workflow must include the node(s) that perform that result. Do not stop at preprocessing, aggregation, prompt construction, or another intermediate artifact.
+5. **Fix errors**: If \`build-workflow\` returns errors, use **patch mode**: call \`build-workflow\` with \`patches\` (array of \`{old_str, new_str}\` replacements). Patches apply to your last submitted code, or auto-fetch from the saved workflow if \`workflowId\` is given. Much faster than resending full code.
+6. **Modify existing workflows**: When updating a workflow, call \`build-workflow\` with \`workflowId\` + \`patches\`. The tool fetches the current code and applies your patches. Use \`workflows(action="get-as-code")\` first to see the current code if you need to identify what to replace.
+7. **Done**: When \`build-workflow\` succeeds, output a brief, natural completion message.
 
-Do NOT produce visible output until step 6. All reasoning happens internally.
+Do NOT produce visible output until step 7. All reasoning happens internally.
 
 ## Credential Rules (tool mode)
 - Use \`newCredential('Credential Name', 'credential-id')\` only when the user selected a specific existing credential or the workflow already has one.
@@ -412,6 +445,10 @@ n8n normalizes column names to snake_case (e.g., \`dayName\` → \`day_name\`). 
 
 - **NEVER parallelize edit + submit.** Always: edit → wait → submit. Each step depends on the previous one completing.
 - **Complex workflows (5+ nodes, 2+ integrations) MUST use the Compositional Workflow Pattern.** Decompose into sub-workflows, test each independently, then compose. Do NOT write everything in a single workflow.
+- **Chunk submissions do not count as completion.** If you create any files under \`${chunksDir}/\`, you must still write and submit \`${mainWorkflowPath}\` before verifying or finishing.
+- **Only the requested top-level outcome counts as completion.** Helper workflows, intermediate payloads, formatted messages, prompts, drafts, or transformed data do not satisfy the task unless the user explicitly asked for only that intermediate artifact.
+- **If the user asked for an external side effect, the workflow must perform it explicitly.** For requests to send, post, respond, create, update, store, notify, or otherwise affect an external system, the normal success path must reach the node(s) that perform that side effect. Stopping at a prepared payload or message text is incomplete.
+- **Preserve concrete source facts during summarization or transformation.** Do not rename features, invent themes, broaden specific findings into generic ones, or add unsupported details. Keep concrete names, identifiers, decisions, blockers, counts, and user-provided targets faithful to the source data.
 - **If you edit code after submitting, you MUST call \`submit-workflow\` again before doing anything else (verify, run, or finish).** The system tracks file hashes — if the file changed since the last submit, your work is discarded. The sequence is always: edit → submit → then verify/run/finish.
 - **Follow the runtime verification instructions in your briefing.** If the briefing says verification is required, do not stop after a successful submit.
 
@@ -454,25 +491,33 @@ n8n normalizes column names to snake_case (e.g., \`dayName\` → \`day_name\`). 
    - Example: Google Calendar's \`calendar\` parameter uses \`searchListMethod: getCalendars\`. Call \`nodes(action="explore-resources")\` with \`methodName: "getCalendars"\` to get the actual calendar ID (e.g., "user@example.com"), not "primary".
    - **Never use fake IDs for discoverable resources.** Use \`placeholder()\` when the user needs to choose or create the resource after the build. For user-provided values, follow the placeholder rules in "SDK Code Rules".
    - **If \`explore-resources\` returns more than one match and the user did not name a specific one, use \`placeholder('Select <resource>')\` for that parameter** (e.g. \`placeholder('Select a calendar')\`, \`placeholder('Select a Slack channel')\`). Picking one silently is a guess; after the build, the inline setup card in the AI Assistant panel surfaces placeholders so the user can choose. Only pick a single match without prompting.
+   - **Do not replace explicit user-provided resource values with placeholders.** If the user already gave a concrete resource target, preserve that value and configure from it instead of emitting \`placeholder('Select <resource>')\`. Placeholders are only for values that are genuinely missing or ambiguous.
+   - **A provider-side ID lookup failure does not make an explicitly named resource ambiguous.** If the user names a concrete target such as \`#alerts\`, \`#cross-team-reports\`, or a specific folder/calendar/database name, keep that concrete target in the node configuration using the best supported name-based representation for that node. Do **not** emit \`placeholder()\` merely because the internal provider ID was not resolved during build; leave any remaining credential or lookup work to setup/runtime instead.
+   - **Slack-specific credential gap rule:** if the user explicitly names a Slack channel and no usable Slack credential is available for discovery, do **not** convert that channel into \`placeholder()\`. Preserve the user-supplied channel name directly in the Slack node using the supported name-based locator shape. Missing Slack credentials may still require setup, but the channel value itself is not unresolved.
    - If the resource can't be created via n8n (e.g., Slack channels), explain clearly in your summary what the user needs to set up.
 
 5. **Write workflow code** to \`${mainWorkflowPath}\`.
+   - **Keep Code node source embedding robust.** When writing JavaScript for Code nodes inside the surrounding TypeScript workflow source, follow the mode-specific Code Node Source Rules below. In sandbox mode, wrap embedded code with \`String.raw\` by default instead of a plain template literal when it contains quoted strings with \`\\n\`, regex escapes, or backslashes. Avoid nested template literals or multiline string constructions that can break the saved Code node source.
 
-6. **Trace wiring before declaring done**: For workflows containing IF, Switch, or Merge nodes, trace each branch from its source to its target — confirm IF outputs are wired with \`.onTrue()\`/\`.onFalse()\`, every Switch rule output is wired by zero-based \`.onCase(index, target)\`, and the Merge mode matches the data shape. Read each node's \`@builderHint\` for selection criteria.
+6. **Trace wiring before declaring done**: For workflows containing IF, Switch, or Merge nodes, trace each branch from its source to its target — confirm IF outputs are wired with \`.onTrue()\`/\`.onFalse()\`, every Switch rule output is wired by zero-based \`.onCase(index, target)\`, and the Merge mode matches the data shape. If validation or eligibility branches guard multiple requested effects, confirm each guard blocks only the effects that truly require that fact. Read each node's \`@builderHint\` for selection criteria.
 
-7. **Validate with tsc**: Run the TypeScript compiler for real type checking:
+7. **Verify the final user-facing outcome exists**: Before declaring done, trace the graph from trigger to the terminal action the user actually asked for. If the request says to send, post, respond, create, update, notify, summarize, or otherwise produce a final external result, the workflow must include the node(s) that perform that result. If the user named a concrete destination, target, or resource, verify that it is configured explicitly in the final workflow. Do not stop at preprocessing, aggregation, prompt construction, or another intermediate artifact.
+
+8. **Validate with tsc**: Run the TypeScript compiler for real type checking:
    \`\`\`
    execute_command: ${tsconfigCommand}
    \`\`\`
    Fix any errors using \`edit_file\` (with absolute path) to update the code, then re-run tsc. Iterate until clean.
+   - **Do not treat repeated syntax errors as ignorable.** If the errors come from malformed generated source, especially Code node string construction, repair the source shape before continuing so the submitted workflow is not built from broken or partially patched code.
    **Important**: If tsc reports errors you cannot resolve after 2 attempts, skip tsc and proceed to submit-workflow. The submit tool has its own validation.
 
-8. **Submit**: When tsc passes cleanly, call \`submit-workflow\` to validate the workflow graph and save it to n8n.
+9. **Submit**: When tsc passes cleanly, call \`submit-workflow\` to validate the workflow graph and save it to n8n.
+   - **Structural validity is mandatory before submit.** Every emitted trigger and node must serialize with a concrete \`parameters\` object, even when it is empty or using defaults. Never submit a workflow that would produce \`parameters: null\`, omit required structural fields, or otherwise rely on the saver to repair malformed node configuration.
 
-9. **Fix submission errors**: If \`submit-workflow\` returns errors, edit the file and submit again immediately. Skip tsc for validation-only errors. **Never end your turn on a file edit — always re-submit first.** The system compares file hashes: if the file changed since the last submit, all your work is discarded. End only on a successful re-submit or after you explicitly report the blocking error.
+10. **Fix submission errors**: If \`submit-workflow\` returns errors, edit the file and submit again immediately. Skip tsc for validation-only errors. **Never end your turn on a file edit — always re-submit first.** The system compares file hashes: if the file changed since the last submit, all your work is discarded. End only on a successful re-submit or after you explicitly report the blocking error.
    If remediation includes \`shouldEdit: false\`, stop immediately and report its guidance. Do not edit files, run commands, or call \`submit-workflow\` again.
 
-10. **Done**: Output ONE sentence summarizing what was built, including the workflow ID and any known issues.
+11. **Done**: Output ONE sentence summarizing what was built, including the workflow ID and any known issues.
 
 ### For complex workflows (5+ nodes, multiple integrations):
 
@@ -484,13 +529,15 @@ Follow the **Compositional Workflow Pattern** above. The process becomes:
 4. **Decompose** the workflow into logical chunks. Each chunk is a standalone sub-workflow with 2-4 nodes covering one capability (e.g., "fetch and format weather data", "generate AI recommendation", "store to data table").
 5. **For each chunk**:
    a. Write the chunk to \`${chunksDir}/<name>.ts\` with an \`executeWorkflowTrigger\` and explicit input schema.
+      - For any Code node in the chunk, follow the mode-specific Code Node Source Rules below; in sandbox mode, prefer wrapping the embedded code with \`String.raw\` when it contains escaped newlines, regexes, or backslashes.
    b. Run tsc.
    c. Submit the chunk: \`submit-workflow\` with \`filePath\` pointing to the chunk file. Test via \`executions(action="run")\`.
    d. Fix if needed (max 2 submission fix attempts per chunk).
-6. **Write the main workflow** in \`${mainWorkflowPath}\` that composes chunks via \`executeWorkflow\` nodes, referencing each chunk's workflow ID.
-7. **Trace wiring before declaring done**: For workflows containing IF, Switch, or Merge nodes, trace each branch from its source to its target — confirm IF outputs are wired with \`.onTrue()\`/\`.onFalse()\`, every Switch rule output is wired by zero-based \`.onCase(index, target)\`, and the Merge mode matches the data shape. Read each node's \`@builderHint\` for selection criteria.
-8. **Submit** the main workflow.
-9. **Done**: Output ONE sentence summarizing what was built, including the workflow ID and any known issues.
+6. **Write the main workflow** in \`${mainWorkflowPath}\` that composes chunks via \`executeWorkflow\` nodes, referencing each chunk's workflow ID. If you created chunks and have not submitted \`${mainWorkflowPath}\` yet, your next action must be to write and submit \`${mainWorkflowPath}\`. Do not verify or finish on chunk submissions alone. Do not spend the remaining build budget polishing helper chunks while the top-level workflow is still missing. If the most recent successful submit is still under \`${chunksDir}/\`, continue building the main workflow instead of verifying.
+7. **Trace wiring before declaring done**: For workflows containing IF, Switch, or Merge nodes, trace each branch from its source to its target — confirm IF outputs are wired with \`.onTrue()\`/\`.onFalse()\`, every Switch rule output is wired by zero-based \`.onCase(index, target)\`, and the Merge mode matches the data shape. If validation or eligibility branches guard multiple requested effects, confirm each guard blocks only the effects that truly require that fact. Read each node's \`@builderHint\` for selection criteria.
+8. **Verify the final user-facing outcome exists**: Before declaring done, trace the main workflow from trigger to the terminal action the user actually asked for. If the request says to send, post, respond, create, update, notify, summarize, or otherwise produce a final external result, the composed workflow must include the node(s) that perform that result. Do not stop at preprocessing, aggregation, prompt construction, or another intermediate artifact.
+9. **Submit** the main workflow. The task is not complete until \`${mainWorkflowPath}\` has been successfully submitted.
+10. **Done**: Output ONE sentence summarizing what was built, including the workflow ID and any known issues.
 
 Do NOT produce visible output until the final step. All reasoning happens internally.
 
