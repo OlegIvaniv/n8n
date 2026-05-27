@@ -8,6 +8,8 @@
 
 import type { InstanceAiConfirmRequest, InstanceAiEvalExecutionResult } from '@n8n/api-types';
 import crypto from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
@@ -22,13 +24,15 @@ import { fetchPrebuiltBuild } from './prebuilt-workflows';
 import { SONNET_MODEL } from '../../src/utils/eval-agents';
 import { runBinaryChecks } from '../binaryChecks/index';
 import type { BinaryCheckContext, CheckOutcome } from '../binaryChecks/types';
-import { verifyChecklist } from '../checklist/verifier';
+import { type VerifierAttemptDebug, verifyChecklist } from '../checklist/verifier';
 import type { N8nClient, WorkflowResponse } from '../clients/n8n-client';
 import { buildConversationMetrics, extractOutcomeFromEvents } from '../outcome/event-parser';
 import { buildTranscriptFromEvents } from '../outcome/transcript-from-events';
 import { buildAgentOutcome, extractWorkflowIdsFromMessages } from '../outcome/workflow-discovery';
 import type {
+	BuildTrace,
 	ChecklistItem,
+	ChecklistResult,
 	CapturedEvent,
 	ConversationMetrics,
 	ConversationTurn,
@@ -46,9 +50,84 @@ import { UserProxyLlm, type ProxyDecisionStats } from '../utils/user-proxy';
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT_MS = 900_000;
+const EVAL_DATA_DIR = path.join(__dirname, '..', '..', '.data');
 
-/** Max concurrent scenario executions per test case */
-const MAX_CONCURRENT_SCENARIOS = 99;
+function getMaxConcurrentScenarios(): number {
+	const raw = process.env.N8N_EVAL_MAX_CONCURRENT_SCENARIOS;
+	const parsed = raw ? Number.parseInt(raw, 10) : 4;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 4;
+}
+
+/**
+ * Max concurrent scenario executions per test case.
+ *
+ * Each scenario can trigger multiple LLM calls (mock generation + verifier),
+ * so effectively-unbounded fan-out causes provider-side throttling and turns
+ * verifier/model errors into noisy batch-wide failures.
+ */
+const MAX_CONCURRENT_SCENARIOS = getMaxConcurrentScenarios();
+
+function makeArtifactTimestamp(): string {
+	return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function slugifyArtifactSegment(value: string, fallback: string): string {
+	const slug = value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 64);
+
+	return slug.length > 0 ? slug : fallback;
+}
+
+function deriveTestCaseArtifactName(testCase: WorkflowTestCase): string {
+	return slugifyArtifactSegment(testCase.conversation[0]?.text ?? '', 'workflow');
+}
+
+async function writeScenarioVerificationSnapshot(input: {
+	testCaseName: string;
+	scenarioName: string;
+	workflowId: string;
+	passed: boolean;
+	result: ChecklistResult | undefined;
+	verificationResults: ChecklistResult[];
+	verifierAttempts: VerifierAttemptDebug[];
+	buildTrace?: BuildTrace;
+	logger: EvalLogger;
+}): Promise<void> {
+	const timestamp = makeArtifactTimestamp();
+	const fileName = `${slugifyArtifactSegment(input.testCaseName, 'workflow')}_${slugifyArtifactSegment(input.scenarioName, 'scenario')}_${timestamp}.json`;
+	const filePath = path.join(EVAL_DATA_DIR, fileName);
+
+	try {
+		await mkdir(EVAL_DATA_DIR, { recursive: true });
+		await writeFile(
+			filePath,
+			JSON.stringify(
+				{
+					timestamp,
+					workflowId: input.workflowId,
+					testCaseName: input.testCaseName,
+					scenarioName: input.scenarioName,
+					passed: input.passed,
+					result: input.result ?? null,
+					verificationResults: input.verificationResults,
+					verifierAttempts: input.verifierAttempts,
+					buildTrace: input.buildTrace ?? null,
+				},
+				null,
+				2,
+			),
+			'utf8',
+		);
+		input.logger.verbose(`    [${input.scenarioName}] wrote verifier snapshot: ${filePath}`);
+	} catch (error) {
+		input.logger.warn(
+			`    [${input.scenarioName}] failed to write verifier snapshot: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Workflow test case runner — build once, run scenarios against it
@@ -131,6 +210,8 @@ export async function runWorkflowTestCase(
 	result.workflowBuildSuccess = true;
 	result.workflowId = build.workflowId;
 	result.workflowJson = build.workflowJsons[0];
+	result.buildTrace = build.buildTrace;
+	const testCaseArtifactName = deriveTestCaseArtifactName(testCase);
 
 	const scenarioStart = Date.now();
 	result.executionScenarioResults = await runWithConcurrency(
@@ -144,6 +225,8 @@ export async function runWorkflowTestCase(
 					build.workflowJsons,
 					logger,
 					timeoutMs,
+					testCaseArtifactName,
+					build.buildTrace,
 				);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
@@ -238,6 +321,7 @@ export interface BuildResult {
 	workflowId?: string;
 	workflowJsons: WorkflowResponse[];
 	error?: string;
+	buildTrace?: BuildTrace;
 	/** IDs to pass to cleanupBuild() */
 	createdWorkflowIds: string[];
 	createdDataTableIds: string[];
@@ -358,6 +442,11 @@ export async function buildWorkflow(config: BuildWorkflowConfig): Promise<BuildR
 
 		const messageWorkflowIds = extractWorkflowIdsFromMessages(threadMessages.messages);
 		const eventOutcome = extractOutcomeFromEvents(events);
+		const buildTrace: BuildTrace = {
+			finalText: eventOutcome.finalText,
+			toolCalls: eventOutcome.toolCalls,
+			agentActivities: eventOutcome.agentActivities,
+		};
 		const outcome = await buildAgentOutcome(
 			client,
 			eventOutcome,
@@ -411,6 +500,7 @@ export async function buildWorkflow(config: BuildWorkflowConfig): Promise<BuildR
 				success: false,
 				error: buildError,
 				workflowJsons: [],
+				buildTrace,
 				createdWorkflowIds: [],
 				createdDataTableIds: outcome.dataTablesCreated,
 				conversationMetrics,
@@ -437,6 +527,7 @@ export async function buildWorkflow(config: BuildWorkflowConfig): Promise<BuildR
 			success: true,
 			workflowId: outcome.workflowsCreated[0].id,
 			workflowJsons: outcome.workflowJsons,
+			buildTrace,
 			createdWorkflowIds: outcome.workflowsCreated.map((wf) => wf.id),
 			createdDataTableIds: outcome.dataTablesCreated,
 			conversationMetrics,
@@ -478,8 +569,19 @@ export async function executeScenario(
 	workflowJsons: WorkflowResponse[],
 	logger: EvalLogger,
 	timeoutMs?: number,
+	testCaseName?: string,
+	buildTrace?: BuildTrace,
 ): Promise<ExecutionScenarioResult> {
-	return await runScenario(client, scenario, workflowId, workflowJsons, logger, timeoutMs);
+	return await runScenario(
+		client,
+		scenario,
+		workflowId,
+		workflowJsons,
+		logger,
+		timeoutMs,
+		testCaseName,
+		buildTrace,
+	);
 }
 
 /**
@@ -526,6 +628,8 @@ async function runScenario(
 	workflowJsons: WorkflowResponse[],
 	logger: EvalLogger,
 	timeoutMs?: number,
+	testCaseName?: string,
+	buildTrace?: BuildTrace,
 ): Promise<ExecutionScenarioResult> {
 	const execStart = Date.now();
 	const evalResult = await client.executeWithLlmMock(workflowId, scenario.dataSetup, timeoutMs);
@@ -547,15 +651,27 @@ async function runScenario(
 		},
 	];
 
-	const verificationResults = await verifyChecklist(
+	const verification = await verifyChecklist(
 		scenarioChecklist,
 		verificationArtifact,
 		workflowJsons,
 	);
+	const verificationResults = verification.results;
 
 	const verifyMs = Date.now() - verifyStart;
 	const passed = verificationResults.length > 0 && verificationResults[0].pass;
 	const result = verificationResults[0];
+	await writeScenarioVerificationSnapshot({
+		testCaseName: testCaseName ?? `workflow-${workflowId}`,
+		scenarioName: scenario.name,
+		workflowId,
+		passed,
+		result,
+		verificationResults,
+		verifierAttempts: verification.attempts,
+		buildTrace,
+		logger,
+	});
 	const reasoning = result?.reasoning ?? 'No verification result — LLM verifier returned empty';
 	const failureCategory = result?.failureCategory ?? (result ? undefined : 'verification_failure');
 	const rootCause = result?.rootCause;

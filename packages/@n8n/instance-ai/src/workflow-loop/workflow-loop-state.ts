@@ -143,6 +143,14 @@ export const workflowSetupRequirementSchema = z.discriminatedUnion('status', [
 
 export type WorkflowSetupRequirement = z.infer<typeof workflowSetupRequirementSchema>;
 
+export const workflowVerificationModeSchema = z.enum([
+	'mocked_credentials',
+	'real_credentials',
+	'not_verified',
+]);
+
+export type WorkflowVerificationMode = z.infer<typeof workflowVerificationModeSchema>;
+
 /**
  * Structured trigger descriptor for each trigger node in the submitted workflow.
  * The orchestrator uses `nodeType` only to shape verification input data.
@@ -160,6 +168,7 @@ export const workflowBuildOutcomeSchema = z.object({
 	runId: z.string().optional(),
 	taskId: z.string(),
 	workflowId: z.string().optional(),
+	workflowName: z.string().optional(),
 	submitted: z.boolean(),
 	triggerType: triggerTypeSchema,
 	/**
@@ -192,6 +201,8 @@ export const workflowBuildOutcomeSchema = z.object({
 	verificationReadiness: workflowVerificationReadinessSchema.optional(),
 	/** Deterministic setup handoff verdict for post-verification workflow setup. */
 	setupRequirement: workflowSetupRequirementSchema.optional(),
+	/** Whether the workflow was verified with mocked credentials, real credentials, or not verified. */
+	verificationMode: workflowVerificationModeSchema.optional(),
 	remediation: remediationMetadataSchema.optional(),
 	/**
 	 * Structured verification record from the most recent `verify-built-workflow`
@@ -251,6 +262,7 @@ export type WorkflowLoopAction =
 			type: 'done';
 			workflowId?: string;
 			summary: string;
+			verificationMode?: WorkflowVerificationMode;
 			mockedCredentialTypes?: string[];
 			hasUnresolvedPlaceholders?: boolean;
 	  }

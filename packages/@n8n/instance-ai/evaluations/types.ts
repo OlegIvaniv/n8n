@@ -150,6 +150,12 @@ export interface EventOutcome {
 	agentActivities: AgentActivity[];
 }
 
+export interface BuildTrace {
+	finalText: string;
+	toolCalls: CapturedToolCall[];
+	agentActivities: AgentActivity[];
+}
+
 // ---------------------------------------------------------------------------
 // Workflow evaluation test cases
 // ---------------------------------------------------------------------------
@@ -214,6 +220,8 @@ export interface WorkflowTestCaseResult {
 	threadId?: string;
 	transcript?: TranscriptTurn[];
 	workflowChecks?: CheckOutcome[];
+	/** Captured build-time sub-agent/tool activity for builder debugging. */
+	buildTrace?: BuildTrace;
 }
 
 // ---------------------------------------------------------------------------

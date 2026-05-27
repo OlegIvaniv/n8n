@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Instance AI Trace Viewer</title>
+		<link rel="stylesheet" href="/styles.css" />
+	</head>
+	<body>
+		<header class="topbar">
+			<div>
+				<p class="eyebrow">n8n Instance AI</p>
+				<h1>Trace Viewer</h1>
+			</div>
+			<div class="toolbar">
+				<span class="status-dot"></span>
+				<span id="connectionStatus" class="connection-status">Loading local trace service</span>
+				<button id="refreshButton" type="button" title="Refresh traces">Refresh</button>
+			</div>
+		</header>
+
+		<section id="fileModeBanner" class="file-mode-banner" hidden>
+			This viewer needs its local server. Open
+			<a href="http://127.0.0.1:4173">http://127.0.0.1:4173</a>
+			instead of opening the HTML file directly.
+		</section>
+
+		<main class="shell">
+			<aside class="sidebar">
+				<section class="panel">
+					<div class="panel-heading">
+						<h2>Eval Runs</h2>
+						<span id="evalSummary" class="muted"></span>
+					</div>
+					<div id="evalList" class="stack"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-heading">
+						<h2>Reports</h2>
+					</div>
+					<div id="reportList" class="stack"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-heading">
+						<h2>Agent Threads</h2>
+					</div>
+					<div id="threadList" class="stack"></div>
+				</section>
+			</aside>
+
+			<section class="workspace">
+				<section class="panel hero-panel">
+					<div class="panel-heading">
+						<h2 id="detailTitle">Select a run or thread</h2>
+						<span id="detailMeta" class="muted"></span>
+					</div>
+					<div id="evalSource" class="source-banner"></div>
+					<p class="hero-copy">
+						Inspect one run at a time: choose a scenario for execution detail, or choose a thread for planner and builder chronology.
+					</p>
+					<div id="detailSummary" class="summary-grid"></div>
+				</section>
+
+				<section class="panel">
+					<div class="panel-heading">
+						<h2>Timeline</h2>
+					</div>
+					<div id="timeline" class="timeline empty-state">
+						Choose an eval run to inspect execution nodes, or choose an agent thread to inspect planner and builder messages.
+					</div>
+				</section>
+			</section>
+		</main>
+
+		<script type="module" src="/app.js"></script>
+	</body>
+</html>

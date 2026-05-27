@@ -27,6 +27,7 @@ import type {
 	WorkflowLoopSource,
 	WorkflowLoopState,
 	VerificationResult,
+	WorkflowVerificationMode,
 } from './workflow-loop-state';
 
 // ── Work item creation ──────────────────────────────────────────────────────
@@ -57,6 +58,12 @@ interface TransitionResult {
 	state: WorkflowLoopState;
 	action: WorkflowLoopAction;
 	attempt: AttemptRecord;
+}
+
+function verificationModeFromMockedCredentials(
+	mockedCredentialTypes: string[] | undefined,
+): WorkflowVerificationMode {
+	return mockedCredentialTypes?.length ? 'mocked_credentials' : 'real_credentials';
 }
 
 export function handleBuildOutcome(
@@ -187,6 +194,7 @@ export function handleBuildOutcome(
 				type: 'done',
 				workflowId: outcome.workflowId,
 				summary: outcome.summary,
+				verificationMode: outcome.verificationMode ?? 'not_verified',
 				mockedCredentialTypes,
 				hasUnresolvedPlaceholders: updatedState.hasUnresolvedPlaceholders,
 			},
@@ -261,6 +269,9 @@ export function handleVerificationVerdict(
 					type: 'done',
 					workflowId: verdict.workflowId,
 					summary: verdict.summary,
+					verificationMode: verificationModeFromMockedCredentials(
+						normalizedState.mockedCredentialTypes,
+					),
 					mockedCredentialTypes: normalizedState.mockedCredentialTypes,
 					hasUnresolvedPlaceholders: normalizedState.hasUnresolvedPlaceholders,
 				},
@@ -281,6 +292,7 @@ export function handleVerificationVerdict(
 					type: 'done',
 					workflowId: verdict.workflowId,
 					summary: verdict.summary,
+					verificationMode: 'not_verified',
 					mockedCredentialTypes: normalizedState.mockedCredentialTypes,
 					hasUnresolvedPlaceholders: normalizedState.hasUnresolvedPlaceholders,
 				},

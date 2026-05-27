@@ -22,7 +22,7 @@ const restrictedLazyRuntimeImports = [
 export default defineConfig(
 	baseConfig,
 	{
-		ignores: ['scripts/**/*.cjs', 'skills/**/*.mjs'],
+		ignores: ['scripts/**/*.cjs', 'skills/**/*.mjs', 'trace-viewer/**/*.js', 'trace-viewer/**/*.mjs'],
 	},
 	{
 		rules: {

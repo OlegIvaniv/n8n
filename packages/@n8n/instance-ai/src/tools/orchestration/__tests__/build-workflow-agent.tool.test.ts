@@ -42,6 +42,7 @@ const {
 	buildWarmBuilderFollowUp,
 	createMainWorkflowSnapshot,
 	determineSetupRequirement,
+	determineVerificationMode,
 	determineVerificationReadiness,
 	getBuilderSessionMemory,
 	builderWorkflowWorkspaceLayout,
@@ -49,6 +50,7 @@ const {
 	mergeLatestVerificationIntoOutcome,
 	settleMissingMainWorkflowSubmit,
 	supportingWorkflowIdsFromSubmitAttempts,
+	reportMissingMainWorkflowSubmit,
 } =
 	// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/consistent-type-imports
 	require('../build-workflow-agent.tool') as typeof import('../build-workflow-agent.tool');
@@ -446,6 +448,34 @@ describe('determineVerificationReadiness', () => {
 			status: 'not_verifiable',
 			reason: 'non-mockable-trigger',
 		});
+	});
+});
+
+describe('determineVerificationMode', () => {
+	it('marks successful verification with mocked credentials explicitly', () => {
+		expect(
+			determineVerificationMode({
+				submitted: true,
+				workflowId: 'workflow-1',
+				triggerNodes: [{ nodeName: 'Webhook', nodeType: 'n8n-nodes-base.webhook' }],
+				mockedCredentialTypes: ['slackOAuth2Api', 'openAiApi'],
+				verification: {
+					attempted: true,
+					success: true,
+					executionId: 'exec-1',
+				},
+			}),
+		).toBe('mocked_credentials');
+	});
+
+	it('marks unverified outcomes explicitly', () => {
+		expect(
+			determineVerificationMode({
+				submitted: true,
+				workflowId: 'workflow-1',
+				triggerNodes: [{ nodeName: 'Webhook', nodeType: 'n8n-nodes-base.webhook' }],
+			}),
+		).toBe('not_verified');
 	});
 });
 
@@ -937,6 +967,77 @@ describe('withTerminalLoopState', () => {
 });
 
 describe('finalizeBuildResult', () => {
+	it('replaces builder prose with explicit mocked-credential verification text', async () => {
+		const context = createMockContext({
+			workflowTaskService: {
+				getWorkflowLoopState: jest.fn().mockResolvedValue(undefined),
+				getBuildOutcome: jest.fn().mockResolvedValue(undefined),
+			} as unknown as OrchestrationContext['workflowTaskService'],
+		});
+
+		const result = await finalizeBuildResult(context, 'wi_test', {
+			text: 'Builder freeform text.',
+			outcome: {
+				workItemId: 'wi_test',
+				runId: 'run_test',
+				taskId: 'task_test',
+				workflowId: 'wf_123',
+				workflowName: 'Daily Slack AI Digest',
+				submitted: true,
+				triggerType: 'manual_or_testable',
+				needsUserInput: false,
+				mockedCredentialTypes: ['slackOAuth2Api', 'openAiApi'],
+				verification: {
+					attempted: true,
+					success: true,
+					executionId: 'exec_1',
+				},
+				summary: 'Builder freeform text.',
+			},
+		});
+
+		expect(result.text).toBe(
+			'Daily Slack AI Digest built successfully (workflow ID: wf_123). Verification used mocked Slack and OpenAI credentials, so the workflow still requires setup before real execution.',
+		);
+		expect(result.outcome.summary).toBe(result.text);
+		expect(result.outcome.verificationMode).toBe('mocked_credentials');
+	});
+
+	it('replaces builder prose with explicit real-credential verification text', async () => {
+		const context = createMockContext({
+			workflowTaskService: {
+				getWorkflowLoopState: jest.fn().mockResolvedValue(undefined),
+				getBuildOutcome: jest.fn().mockResolvedValue(undefined),
+			} as unknown as OrchestrationContext['workflowTaskService'],
+		});
+
+		const result = await finalizeBuildResult(context, 'wi_test', {
+			text: 'Builder freeform text.',
+			outcome: {
+				workItemId: 'wi_test',
+				runId: 'run_test',
+				taskId: 'task_test',
+				workflowId: 'wf_123',
+				workflowName: 'Contact Form Automation',
+				submitted: true,
+				triggerType: 'manual_or_testable',
+				needsUserInput: false,
+				verification: {
+					attempted: true,
+					success: true,
+					executionId: 'exec_1',
+				},
+				summary: 'Builder freeform text.',
+			},
+		});
+
+		expect(result.text).toBe(
+			'Contact Form Automation built and verified with real credentials (workflow ID: wf_123).',
+		);
+		expect(result.outcome.summary).toBe(result.text);
+		expect(result.outcome.verificationMode).toBe('real_credentials');
+	});
+
 	it('applies terminal loop state to recovered saved-workflow results', async () => {
 		const remediation = createRemediation({
 			category: 'needs_setup',
@@ -977,10 +1078,12 @@ describe('finalizeBuildResult', () => {
 
 		expect(context.workflowTaskService?.getWorkflowLoopState).toHaveBeenCalledWith('wi_test');
 		expect(result).toMatchObject({
-			text: 'Recovered workflow.',
+			text: 'Workflow built successfully (workflow ID: wf_123). Verification did not run yet, and the workflow still requires setup before real execution.',
 			outcome: {
 				submitted: true,
 				workflowId: 'wf_123',
+				summary:
+					'Workflow built successfully (workflow ID: wf_123). Verification did not run yet, and the workflow still requires setup before real execution.',
 				needsUserInput: true,
 				blockingReason: 'Route to setup.',
 				remediation: {
@@ -988,6 +1091,37 @@ describe('finalizeBuildResult', () => {
 					shouldEdit: false,
 					reason: 'mocked_credentials_or_placeholders',
 				},
+			},
+		});
+	});
+});
+
+describe('builder missing main workflow submit outcome', () => {
+	it('reports a failed build outcome when the builder finishes without submitting the main workflow', async () => {
+		const reportBuildOutcome = jest.fn().mockResolvedValue({ type: 'noop' });
+		const context = createMockContext({
+			runId: 'run_test',
+			workflowTaskService: {
+				reportBuildOutcome,
+			} as unknown as OrchestrationContext['workflowTaskService'],
+		});
+
+		const result = await reportMissingMainWorkflowSubmit(context, 'wi_test', 'task_test');
+
+		expect(reportBuildOutcome).toHaveBeenCalledWith(
+			expect.objectContaining({
+				workItemId: 'wi_test',
+				runId: 'run_test',
+				taskId: 'task_test',
+				submitted: false,
+				summary: 'Error: workflow builder finished without submitting /src/workflow.ts.',
+			}),
+		);
+		expect(result).toMatchObject({
+			text: 'Error: workflow builder finished without submitting /src/workflow.ts.',
+			outcome: {
+				workItemId: 'wi_test',
+				submitted: false,
 			},
 		});
 	});

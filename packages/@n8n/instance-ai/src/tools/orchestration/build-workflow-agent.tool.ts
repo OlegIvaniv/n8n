@@ -53,6 +53,7 @@ import {
 	type TriggerType,
 	type WorkflowBuildOutcome,
 	type WorkflowSetupRequirement,
+	type WorkflowVerificationMode,
 	type WorkflowVerificationReadiness,
 	type WorkflowLoopState,
 } from '../../workflow-loop';
@@ -383,6 +384,16 @@ function hasSuccessfulStructuredVerification(outcome: OutcomeForVerificationRead
 	);
 }
 
+export function determineVerificationMode(
+	outcome: OutcomeForVerificationReadiness,
+): WorkflowVerificationMode {
+	if (!hasSuccessfulStructuredVerification(outcome)) {
+		return 'not_verified';
+	}
+
+	return hasMockedCredentials(outcome) ? 'mocked_credentials' : 'real_credentials';
+}
+
 export function determineVerificationReadiness(
 	outcome: OutcomeForVerificationReadiness,
 ): WorkflowVerificationReadiness {
@@ -477,7 +488,7 @@ export function determineSetupRequirement(
 
 type OutcomeWithoutDeterministicRouting = Omit<
 	WorkflowBuildOutcome,
-	'verificationReadiness' | 'setupRequirement'
+	'verificationReadiness' | 'setupRequirement' | 'verificationMode'
 >;
 
 function withDeterministicRouting(
@@ -487,6 +498,7 @@ function withDeterministicRouting(
 		...outcome,
 		verificationReadiness: determineVerificationReadiness(outcome),
 		setupRequirement: determineSetupRequirement(outcome),
+		verificationMode: determineVerificationMode(outcome),
 	};
 }
 
@@ -525,6 +537,7 @@ function buildOutcome(
 		runId,
 		taskId,
 		workflowId: attempt.workflowId,
+		workflowName: attempt.workflowName,
 		submitted: true,
 		triggerType: detectTriggerType(attempt),
 		needsUserInput: Boolean(placeholderRemediation),
@@ -540,6 +553,17 @@ function buildOutcome(
 		remediation: placeholderRemediation ?? attempt.remediation,
 		summary: finalText,
 	});
+}
+
+export async function reportMissingMainWorkflowSubmit(
+	context: OrchestrationContext,
+	workItemId: string,
+	taskId: string,
+): Promise<{ text: string; outcome: WorkflowBuildOutcome }> {
+	const text = 'Error: workflow builder finished without submitting /src/workflow.ts.';
+	const outcome = buildOutcome(workItemId, context.runId, taskId, undefined, text);
+	await context.workflowTaskService?.reportBuildOutcome(outcome);
+	return { text, outcome };
 }
 
 export function mergeLatestVerificationIntoOutcome(
@@ -588,10 +612,91 @@ async function finalBuildOutcome(
 ): Promise<WorkflowBuildOutcome> {
 	const latestOutcome = await getLatestBuildOutcome(context, workItemId);
 	const loopState = await context.workflowTaskService?.getWorkflowLoopState(workItemId);
-	return withTerminalLoopState(
+	const routedOutcome = withDeterministicRouting(
 		mergeLatestVerificationIntoOutcome(outcome, latestOutcome),
-		loopState,
 	);
+	return withTerminalLoopState(routedOutcome, loopState);
+}
+
+function titleCaseWord(word: string): string {
+	switch (word.toLowerCase()) {
+		case 'api':
+			return 'API';
+		case 'http':
+			return 'HTTP';
+		case 'mcp':
+			return 'MCP';
+		case 'openai':
+			return 'OpenAI';
+		default:
+			return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+	}
+}
+
+function humanizeCredentialType(credentialType: string): string {
+	const normalized = credentialType
+		.replace(/OAuth2Api$/i, '')
+		.replace(/OAuth2$/i, '')
+		.replace(/Api$/i, '')
+		.replace(/Credential$/i, '')
+		.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+		.replace(/[-_]+/g, ' ')
+		.trim();
+	const words = normalized
+		.split(/\s+/)
+		.map((word) => word.toLowerCase())
+		.filter((word) => word.length > 0 && word !== 'oauth2');
+	const label = words.map(titleCaseWord).join(' ');
+	return label === 'Open Ai' ? 'OpenAI' : label;
+}
+
+function formatList(items: string[]): string {
+	if (items.length === 0) return '';
+	if (items.length === 1) return items[0];
+	if (items.length === 2) return `${items[0]} and ${items[1]}`;
+	return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
+function formatMockedCredentialPhrase(mockedCredentialTypes: string[] | undefined): string {
+	const labels = [...new Set((mockedCredentialTypes ?? []).map(humanizeCredentialType))].filter(
+		(label) => label.length > 0,
+	);
+	if (labels.length === 0) return 'mocked credentials';
+	return `mocked ${formatList(labels)} credentials`;
+}
+
+function formatWorkflowSubject(outcome: WorkflowBuildOutcome): string {
+	const workflowName = outcome.workflowName?.trim();
+	return workflowName && workflowName.length > 0 ? workflowName : 'Workflow';
+}
+
+function formatWorkflowIdSuffix(outcome: WorkflowBuildOutcome): string {
+	return outcome.workflowId ? ` (workflow ID: ${outcome.workflowId})` : '';
+}
+
+function formatDeterministicBuildSummary(
+	outcome: WorkflowBuildOutcome,
+	originalText: string,
+): string {
+	if (!outcome.submitted || !outcome.workflowId) {
+		return originalText;
+	}
+
+	const subject = formatWorkflowSubject(outcome);
+	const workflowIdSuffix = formatWorkflowIdSuffix(outcome);
+
+	switch (outcome.verificationMode) {
+		case 'mocked_credentials':
+			return `${subject} built successfully${workflowIdSuffix}. Verification used ${formatMockedCredentialPhrase(outcome.mockedCredentialTypes)}, so the workflow still requires setup before real execution.`;
+		case 'real_credentials':
+			return `${subject} built and verified with real credentials${workflowIdSuffix}.`;
+		case 'not_verified':
+		default:
+			if (outcome.setupRequirement?.status === 'required') {
+				return `${subject} built successfully${workflowIdSuffix}. Verification did not run yet, and the workflow still requires setup before real execution.`;
+			}
+			return `${subject} built successfully${workflowIdSuffix}. Verification is still pending.`;
+	}
 }
 
 export async function finalizeBuildResult(
@@ -599,9 +704,14 @@ export async function finalizeBuildResult(
 	workItemId: string,
 	result: { text: string; outcome: WorkflowBuildOutcome },
 ): Promise<{ text: string; outcome: WorkflowBuildOutcome }> {
+	const outcome = await finalBuildOutcome(context, workItemId, result.outcome);
+	const text = formatDeterministicBuildSummary(outcome, result.text);
 	return {
-		text: result.text,
-		outcome: await finalBuildOutcome(context, workItemId, result.outcome),
+		text,
+		outcome: {
+			...outcome,
+			summary: text,
+		},
 	};
 }
 
@@ -655,7 +765,9 @@ The system tracks file hashes. If you edit the code and then call \`executions(a
 
 ### Verification
 
-- If submit-workflow returned mocked credentials, call \`verify-built-workflow\` with the workItemId and workflowId from this task.
+- Never call \`verify-built-workflow\` for a chunk submission under \`chunks/\`. Chunks are intermediate artifacts only.
+- If the most recent successful submit was for \`chunks/*\` and \`src/workflow.ts\` has not been submitted yet, continue building \`src/workflow.ts\`. Do not verify and do not finish.
+- If submit-workflow returned mocked credentials for the top-level user-facing workflow in \`src/workflow.ts\`, call \`verify-built-workflow\` with the workItemId and workflowId from this task.
 - Otherwise pick based on trigger type:
   - **Manual / Schedule** — \`executions(action="run")\`.
   - **Form Trigger** — pass \`inputData\` as a flat field map, e.g. \`{name: "Alice", email: "a@b.c"}\`. Do NOT wrap in \`formFields\` — production Form Trigger emits fields directly on \`$json\`, and the adapter rejects wrapped payloads.

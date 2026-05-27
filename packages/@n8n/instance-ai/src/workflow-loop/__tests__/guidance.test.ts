@@ -26,6 +26,41 @@ describe('formatWorkflowLoopGuidance', () => {
 			expect(result).toContain('Workflow ID: wf-123');
 		});
 
+		it('should make real-credential verification explicit when provided', () => {
+			const action: WorkflowLoopAction = {
+				type: 'done',
+				summary: 'All good',
+				workflowId: 'wf-123',
+				verificationMode: 'real_credentials',
+			};
+			const result = formatWorkflowLoopGuidance(action);
+			expect(result).toContain('verified successfully with real credentials');
+		});
+
+		it('should make mocked-credential verification explicit when provided', () => {
+			const action: WorkflowLoopAction = {
+				type: 'done',
+				summary: 'Built with mocks',
+				workflowId: 'wf-123',
+				verificationMode: 'mocked_credentials',
+				mockedCredentialTypes: ['slackOAuth2Api'],
+			};
+			const result = formatWorkflowLoopGuidance(action);
+			expect(result).toContain('verified successfully with mocked credentials');
+			expect(result).toContain('workflows(action="setup")');
+		});
+
+		it('should say when verification is still pending', () => {
+			const action: WorkflowLoopAction = {
+				type: 'done',
+				summary: 'Built but not verified',
+				workflowId: 'wf-123',
+				verificationMode: 'not_verified',
+			};
+			const result = formatWorkflowLoopGuidance(action);
+			expect(result).toContain('verification is still pending');
+		});
+
 		it('should not mention credentials when mockedCredentialTypes is undefined', () => {
 			const action: WorkflowLoopAction = {
 				type: 'done',

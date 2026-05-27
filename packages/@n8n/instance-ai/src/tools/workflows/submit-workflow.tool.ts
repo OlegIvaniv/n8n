@@ -11,6 +11,7 @@ import { hasPlaceholderDeep } from '@n8n/utils';
 import type { WorkflowJSON } from '@n8n/workflow-sdk';
 import { validateWorkflow } from '@n8n/workflow-sdk';
 import { createHash, randomUUID } from 'node:crypto';
+import { Script } from 'node:vm';
 import { z } from 'zod';
 
 import { resolveCredentials, type CredentialMap } from './resolve-credentials';
@@ -35,6 +36,8 @@ export interface SubmitWorkflowAttempt {
 	success: boolean;
 	/** Workflow ID assigned by n8n after a successful save. */
 	workflowId?: string;
+	/** Workflow name saved to n8n after a successful save. */
+	workflowName?: string;
 	/**
 	 * Trigger nodes in the submitted workflow, each carrying name + type.
 	 * Populated by a conservative detector (known-mockable allow-list plus
@@ -73,6 +76,8 @@ const WEBHOOK_NODE_TYPES = new Set([
 	'@n8n/n8n-nodes-langchain.mcpTrigger',
 	'@n8n/n8n-nodes-langchain.chatTrigger',
 ]);
+
+const CODE_NODE_TYPE = 'n8n-nodes-base.code';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -126,13 +131,27 @@ function enhanceValidationErrors(errors: string[]): string[] {
 	const needsHtmlGuidance = errors.some(
 		(error) => error.includes('[MISSING_EXPRESSION_PREFIX]') && error.includes('parameter "html"'),
 	);
+	const needsCodeNodeGuidance = errors.some((error) =>
+		error.includes('Code node JavaScript failed to parse'),
+	);
 
-	if (!needsHtmlGuidance) return errors;
+	if (!needsHtmlGuidance && !needsCodeNodeGuidance) return errors;
 
-	return [
-		...errors,
-		'HTML node guidance: do not embed bare {{ $json... }} inside a large HTML string. Build the final HTML in a Code node and inject serialized/base64 data there, or make the entire parameter an expression string starting with =.',
-	];
+	const enhanced = [...errors];
+
+	if (needsHtmlGuidance) {
+		enhanced.push(
+			'HTML node guidance: do not embed bare {{ $json... }} inside a large HTML string. Build the final HTML in a Code node and inject serialized/base64 data there, or make the entire parameter an expression string starting with =.',
+		);
+	}
+
+	if (needsCodeNodeGuidance) {
+		enhanced.push(
+			'Code node guidance: when embedding jsCode inside workflow TypeScript, wrap it with String.raw`...` so escapes like \\n remain escaped in the saved node.',
+		);
+	}
+
+	return enhanced;
 }
 
 function enhanceBuildErrors(errors: string[]): string[] {
@@ -238,6 +257,39 @@ export function resolveSandboxWorkflowFilePath(
 		return `${root}/${rawFilePath}`;
 	}
 	return rawFilePath;
+}
+
+function validateCodeNodeSyntax(json: WorkflowJSON): ValidationWarning[] {
+	const warnings: ValidationWarning[] = [];
+
+	for (const node of json.nodes ?? []) {
+		if (node.type !== CODE_NODE_TYPE) continue;
+
+		const parameters =
+			node.parameters && typeof node.parameters === 'object'
+				? (node.parameters as Record<string, unknown>)
+				: undefined;
+		const language = typeof parameters?.language === 'string' ? parameters.language : undefined;
+		const jsCode = typeof parameters?.jsCode === 'string' ? parameters.jsCode : undefined;
+
+		if (!jsCode) continue;
+		if (language && language !== 'javaScript') continue;
+
+		try {
+			// Compile the user code inside an async closure so syntax like top-level `await`
+			// remains valid while still surfacing malformed string escaping before save.
+			new Script(`(async () => {\n${jsCode}\n})();`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unknown syntax error';
+			warnings.push({
+				code: 'INVALID_PARAMETER',
+				nodeName: node.name,
+				message: `Code node JavaScript failed to parse: ${message}`,
+			});
+		}
+	}
+
+	return warnings;
 }
 
 export function classifySubmitFailure(
@@ -434,6 +486,7 @@ export function createSubmitWorkflowTool(
 						nodeName: issue.nodeName,
 					});
 				}
+				allWarnings.push(...validateCodeNodeSyntax(json));
 
 				const { errors, informational } = partitionWarnings(allWarnings);
 
@@ -545,6 +598,7 @@ export function createSubmitWorkflowTool(
 				await reportAttempt({
 					success: true,
 					workflowId: savedId,
+					workflowName: json.name || undefined,
 					triggerNodes,
 					mockedNodeNames: hasMockedCredentials ? mockResult.mockedNodeNames : undefined,
 					mockedCredentialTypes: hasMockedCredentials
