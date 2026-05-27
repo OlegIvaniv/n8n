@@ -353,6 +353,12 @@ export interface BuildWorkflowConfig {
 	logger: EvalLogger;
 	/** Optional " [lane N/M]" suffix appended to the build log line. */
 	laneTag?: string;
+	/**
+	 * Last-resort workflow discovery by list-diffing visible workflows. Keep this
+	 * disabled for normal eval runs because concurrent builds make the diff
+	 * non-attributable.
+	 */
+	allowWorkflowListDiffFallback?: boolean;
 }
 
 /** A conversation is multi-turn if it has more than one turn, or if the only
@@ -442,6 +448,7 @@ export async function buildWorkflow(config: BuildWorkflowConfig): Promise<BuildR
 
 		const messageWorkflowIds = extractWorkflowIdsFromMessages(threadMessages.messages);
 		const eventOutcome = extractOutcomeFromEvents(events);
+		const threadWorkflowIds = [...new Set([...eventOutcome.workflowIds, ...messageWorkflowIds])];
 		const buildTrace: BuildTrace = {
 			finalText: eventOutcome.finalText,
 			toolCalls: eventOutcome.toolCalls,
@@ -449,18 +456,11 @@ export async function buildWorkflow(config: BuildWorkflowConfig): Promise<BuildR
 		};
 		const outcome = await buildAgentOutcome(
 			client,
-			eventOutcome,
+			{ ...eventOutcome, workflowIds: threadWorkflowIds },
 			config.preRunWorkflowIds,
 			config.claimedWorkflowIds,
+			{ allowListDiffFallback: config.allowWorkflowListDiffFallback === true },
 		);
-
-		if (messageWorkflowIds.length > 0) {
-			const messageWfSet = new Set(messageWorkflowIds);
-			outcome.workflowsCreated = outcome.workflowsCreated.filter((wf) => messageWfSet.has(wf.id));
-			outcome.workflowJsons = outcome.workflowJsons.filter(
-				(wf) => typeof wf.id === 'string' && messageWfSet.has(wf.id),
-			);
-		}
 
 		if (outcome.workflowsCreated.length === 0) {
 			const toolErrors = events
